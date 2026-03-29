@@ -1,73 +1,97 @@
 #!/usr/bin/env python3
-"""Decision tree classifier with entropy-based splitting (ID3)."""
+"""decision_tree2 - Decision tree classifier with entropy and Gini impurity."""
 import sys, math
 from collections import Counter
 
 def entropy(labels):
-    n = len(labels); counts = Counter(labels)
+    n = len(labels)
+    if n == 0: return 0
+    counts = Counter(labels)
     return -sum((c/n) * math.log2(c/n) for c in counts.values() if c > 0)
 
-def info_gain(data, labels, feature_idx):
-    total_ent = entropy(labels); n = len(data)
-    values = set(row[feature_idx] for row in data)
-    weighted = 0
-    for v in values:
-        subset_labels = [labels[i] for i, row in enumerate(data) if row[feature_idx] == v]
-        weighted += (len(subset_labels) / n) * entropy(subset_labels)
-    return total_ent - weighted
+def gini(labels):
+    n = len(labels)
+    if n == 0: return 0
+    counts = Counter(labels)
+    return 1 - sum((c/n)**2 for c in counts.values())
 
-class TreeNode:
-    def __init__(self, feature=None, value=None, label=None, children=None):
-        self.feature, self.value, self.label = feature, value, label
-        self.children = children or {}
+class DTNode:
+    def __init__(self, feature=None, threshold=None, left=None, right=None, label=None):
+        self.feature = feature
+        self.threshold = threshold
+        self.left = left
+        self.right = right
+        self.label = label
 
-def build_tree(data, labels, features, depth=0, max_depth=10):
-    if len(set(labels)) == 1: return TreeNode(label=labels[0])
-    if not features or depth >= max_depth: return TreeNode(label=Counter(labels).most_common(1)[0][0])
-    gains = [(info_gain(data, labels, f), f) for f in features]
-    _, best = max(gains, key=lambda x: x[0])
-    node = TreeNode(feature=best)
-    values = set(row[best] for row in data)
-    remaining = [f for f in features if f != best]
-    for v in values:
-        subset_data = [row for i, row in enumerate(data) if row[best] == v]
-        subset_labels = [labels[i] for i, row in enumerate(data) if row[best] == v]
-        if subset_data:
-            node.children[v] = build_tree(subset_data, subset_labels, remaining, depth+1, max_depth)
-        else:
-            node.children[v] = TreeNode(label=Counter(labels).most_common(1)[0][0])
-    node._default = Counter(labels).most_common(1)[0][0]
-    return node
+class DecisionTree:
+    def __init__(self, max_depth=10, criterion="entropy"):
+        self.max_depth = max_depth
+        self.criterion = entropy if criterion == "entropy" else gini
+        self.root = None
 
-def predict(tree, sample):
-    if tree.label is not None: return tree.label
-    val = sample[tree.feature] if isinstance(sample, list) else sample.get(tree.feature)
-    child = tree.children.get(val)
-    if child: return predict(child, sample)
-    return getattr(tree, '_default', None)
+    def _best_split(self, X, y):
+        best_gain = -1
+        best_feat = None
+        best_thresh = None
+        parent_imp = self.criterion(y)
+        n = len(y)
+        ndim = len(X[0])
+        for f in range(ndim):
+            values = sorted(set(X[i][f] for i in range(n)))
+            for i in range(len(values) - 1):
+                thresh = (values[i] + values[i+1]) / 2
+                left_y = [y[j] for j in range(n) if X[j][f] <= thresh]
+                right_y = [y[j] for j in range(n) if X[j][f] > thresh]
+                if not left_y or not right_y:
+                    continue
+                gain = parent_imp - (len(left_y)/n * self.criterion(left_y) + len(right_y)/n * self.criterion(right_y))
+                if gain > best_gain:
+                    best_gain = gain
+                    best_feat = f
+                    best_thresh = thresh
+        return best_feat, best_thresh, best_gain
 
-def main():
-    if len(sys.argv) < 2: print("Usage: decision_tree2.py <demo|test>"); return
-    if sys.argv[1] == "test":
-        assert abs(entropy(["a","a","b","b"]) - 1.0) < 0.01
-        assert entropy(["a","a","a"]) == 0
-        # Play tennis dataset (simplified)
-        data = [["sunny","hot"],["sunny","cool"],["rain","hot"],["rain","cool"],["overcast","hot"]]
-        labels = ["no","yes","no","yes","yes"]
-        tree = build_tree(data, labels, [0, 1])
-        assert tree.feature is not None
-        p = predict(tree, ["sunny","cool"]); assert p == "yes"
-        p2 = predict(tree, ["overcast","hot"]); assert p2 == "yes"
-        # Single class
-        tree2 = build_tree([[1],[2]], ["a","a"], [0])
-        assert tree2.label == "a"
-        # Info gain
-        g = info_gain(data, labels, 0); assert g > 0
-        print("All tests passed!")
-    else:
-        data = [["yes","no"],["yes","yes"],["no","yes"],["no","no"]]
-        labels = ["A","A","B","B"]
-        tree = build_tree(data, labels, [0, 1])
-        print(f"Root splits on feature {tree.feature}")
+    def _build(self, X, y, depth):
+        if depth >= self.max_depth or len(set(y)) == 1 or len(y) < 2:
+            return DTNode(label=Counter(y).most_common(1)[0][0])
+        feat, thresh, gain = self._best_split(X, y)
+        if feat is None or gain <= 0:
+            return DTNode(label=Counter(y).most_common(1)[0][0])
+        left_idx = [i for i in range(len(y)) if X[i][feat] <= thresh]
+        right_idx = [i for i in range(len(y)) if X[i][feat] > thresh]
+        left = self._build([X[i] for i in left_idx], [y[i] for i in left_idx], depth+1)
+        right = self._build([X[i] for i in right_idx], [y[i] for i in right_idx], depth+1)
+        return DTNode(feature=feat, threshold=thresh, left=left, right=right)
 
-if __name__ == "__main__": main()
+    def fit(self, X, y):
+        self.root = self._build(X, y, 0)
+
+    def _predict_one(self, node, x):
+        if node.label is not None:
+            return node.label
+        if x[node.feature] <= node.threshold:
+            return self._predict_one(node.left, x)
+        return self._predict_one(node.right, x)
+
+    def predict(self, x):
+        return self._predict_one(self.root, x)
+
+def test():
+    assert abs(entropy(["A","A","B","B"]) - 1.0) < 0.01
+    assert abs(gini(["A","A","B","B"]) - 0.5) < 0.01
+    assert entropy(["A","A","A"]) == 0
+    X = [[0,0],[1,0],[0,1],[1,1],[5,5],[6,5],[5,6],[6,6]]
+    y = [0,0,0,0,1,1,1,1]
+    dt = DecisionTree(max_depth=5)
+    dt.fit(X, y)
+    assert dt.predict([0.5, 0.5]) == 0
+    assert dt.predict([5.5, 5.5]) == 1
+    correct = sum(1 for i in range(len(X)) if dt.predict(X[i]) == y[i])
+    assert correct == len(X)
+    dt2 = DecisionTree(max_depth=5, criterion="gini")
+    dt2.fit(X, y)
+    assert dt2.predict([0, 0]) == 0
+    print("All tests passed!")
+
+if __name__ == "__main__":
+    test() if "--test" in sys.argv else print("decision_tree2: Decision tree classifier. Use --test")
